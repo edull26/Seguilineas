@@ -1,85 +1,87 @@
 import cv2
+import numpy as np
 import RPi.GPIO as GPIO
 import time
 
-# Pines hacia Arduino
-PIN_AVANZAR = 17
-PIN_IZQUIERDA = 27
-PIN_DERECHA = 22
+# Configuración de pines GPIO
+LED_IZQUIERDA = 17
+LED_CENTRO = 27
+LED_DERECHA = 22
 
-# Setup GPIO
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(PIN_AVANZAR, GPIO.OUT)
-GPIO.setup(PIN_IZQUIERDA, GPIO.OUT)
-GPIO.setup(PIN_DERECHA, GPIO.OUT)
+GPIO.setup(LED_IZQUIERDA, GPIO.OUT)
+GPIO.setup(LED_CENTRO, GPIO.OUT)
+GPIO.setup(LED_DERECHA, GPIO.OUT)
 
-# Función para mandar una sola señal activa
-def enviar_senal(avanzar=False, izquierda=False, derecha=False):
-    GPIO.output(PIN_AVANZAR, GPIO.HIGH if avanzar else GPIO.LOW)
-    GPIO.output(PIN_IZQUIERDA, GPIO.HIGH if izquierda else GPIO.LOW)
-    GPIO.output(PIN_DERECHA, GPIO.HIGH if derecha else GPIO.LOW)
+def apagar_todos():
+    GPIO.output(LED_IZQUIERDA, GPIO.LOW)
+    GPIO.output(LED_CENTRO, GPIO.LOW)
+    GPIO.output(LED_DERECHA, GPIO.LOW)
 
-# Cámara
+def detectar_direccion(frame):
+    frame = cv2.resize(frame, (640, 480))  # Tamaño estándar
+    gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    suavizado = cv2.GaussianBlur(gris, (13, 13), 0)
+    bordes = cv2.Canny(suavizado, 50, 150)
+
+    # Cortamos los cuadrantes relevantes
+    q2 = bordes[:, 140:250]  # Borde izquierdo
+    q4 = bordes[:, 370:480]  # Borde derecho
+
+    # Calculamos la suma de píxeles blancos (bordes detectados)
+    suma_q2 = np.sum(q2)
+    suma_q4 = np.sum(q4)
+
+    # Definimos un umbral para considerar si hay borde presente
+    umbral = 50000
+
+    hay_izquierda = suma_q2 > umbral
+    hay_derecha = suma_q4 > umbral
+
+    # Decisión basada en los cuadrantes
+    if hay_izquierda and hay_derecha:
+        direccion = "Avanzar recto"
+        estado = 'centro'
+    elif hay_izquierda:
+        direccion = "Girar a la izquierda"
+        estado = 'izquierda'
+    elif hay_derecha:
+        direccion = "Girar a la derecha"
+        estado = 'derecha'
+    else:
+        direccion = "Sin línea detectada"
+        estado = 'ninguno'  # No enciende ningún LED
+
+    return direccion, estado, bordes
+
+# Captura de video
 cap = cv2.VideoCapture(0)
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # Región de interés (parte baja de la imagen)
-    roi = frame[frame.shape[0]-100:, :]
-
-    # Escala de grises
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-    # Filtro Gaussiano para reducir ruido
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Canny para detección de bordes
-    edges = cv2.Canny(blur, 50, 150)
-
-    # Contornos
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    linea_detectada = False
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 100:
-            continue  # ignorar contornos pequeños
-
-        x, y, w, h = cv2.boundingRect(cnt)
-        cx = x + w // 2  # centro X del contorno
-
-        # Determinar cuadrante según cx
-        if 140 <= cx <= 250:
-            print(f"CX={cx} → Cuadrante 2: girar izquierda")
-            enviar_senal(izquierda=True)
-            linea_detectada = True
-            break
-        elif 251 <= cx <= 369:
-            print(f"CX={cx} → Cuadrante 3: avanzar recto")
-            enviar_senal(avanzar=True)
-            linea_detectada = True
-            break
-        elif 370 <= cx <= 640:
-            print(f"CX={cx} → Cuadrante 4 o 5: girar derecha")
-            enviar_senal(derecha=True)
-            linea_detectada = True
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
             break
 
-    if not linea_detectada:
-        print("No se detectó línea → sin señal")
-        enviar_senal()  # Apaga todas las señales
+        direccion, estado, bordes = detectar_direccion(frame)
+        print(direccion)
 
-    # Mostrar vista para debug
-    cv2.imshow("Canny", edges)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        apagar_todos()  # Apaga todos los LEDs antes de decidir
 
-# Finalizar
-cap.release()
-cv2.destroyAllWindows()
-GPIO.cleanup()
+        if estado == 'izquierda':
+            GPIO.output(LED_IZQUIERDA, GPIO.HIGH)
+        elif estado == 'centro':
+            GPIO.output(LED_CENTRO, GPIO.HIGH)
+        elif estado == 'derecha':
+            GPIO.output(LED_DERECHA, GPIO.HIGH)
+        # Si estado == 'ninguno', no se enciende ningún LED
 
+        cv2.imshow("Bordes", bordes)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    GPIO.cleanup()
